@@ -1,0 +1,38 @@
+# Виртуальное окружение
+venv/
+env/
+.env
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Файлы IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Логи
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Проект
+persistence/
+README.md
