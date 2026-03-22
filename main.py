@@ -5,24 +5,30 @@ from datetime import timedelta
 import os
 import sys
 from dotenv import load_dotenv
+from db import db, init_db, DatabaseContext
 
 # Загрузка токена для бота из переменной окружения
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
+# Инициализируем БД
+init_db()
+
 bot = telebot.TeleBot(BOT_TOKEN)
 
-user_data = {}
 topics_base_path = os.path.join("persistence", "topics")
 
 # Работа с файлами планов пользователей
-plans_base_path = os.path.join("persistence", "user_plans")
-def save_plan(id, plan):
-    with open(os.path.join(plans_base_path, f"{id}.txt"), 'w', encoding='utf-8') as file:
-        file.write(plan)
-def load_plan(id):
-    with open(os.path.join(plans_base_path, f"{id}.txt"), 'r', encoding='utf-8') as file:
-        return file.read()
+def save_plan(chat_id, plan):
+    with DatabaseContext() as ctx:
+        user = ctx.get_or_create_user(chat_id)
+        user.plan = plan
+        user.save()
+
+def load_plan(chat_id):
+    with DatabaseContext() as ctx:
+        user = ctx.get_or_create_user(chat_id)
+        return user.plan
 
 def load_topics(filename):
     topics = []
@@ -43,7 +49,11 @@ def get_exam_date(message):
             bot.send_message(message.chat.id, "Эта дата уже прошла. Введите дату в будущем")
             bot.register_next_step_handler(message, get_exam_date)
             return
-        user_data[message.chat.id] = {"exam_date": examdate , "day_left": day_left}
+        with DatabaseContext() as ctx:
+            user = ctx.get_or_create_user(message.chat.id)            
+            user.exam_date = examdate
+            user.day_left = day_left
+            user.save()
         bot.send_message(message.chat.id, f"До экзамена осталось {day_left} дней.")
 
     except ValueError:
@@ -109,7 +119,7 @@ def callback_handler(call):
         # bot.send_message(call.message.chat.id, f"План подготовки: \n\n {plan}")
         # save_plan(str(call.message.chat.id), plan)
 
-    elif call.date == "sub_physics":
+    elif call.data == "sub_physics":
         topics = load_topics(os.path.join(topics_base_path, "physics.txt"))
         bot.edit_message_text(f"Вы выбрали дисциплину 📚Физика📚\nСписок тем: \n\n{topics}", chat_id = call.message.chat.id, message_id = call.message.message_id)
         bot.send_message(call.message.chat.id, "Введите дату экзамена в формате ДД.ММ.ГГГГ")
@@ -118,7 +128,7 @@ def callback_handler(call):
         # bot.send_message(call.message.chat.id, f"План подготовки: \n\n {plan}")
         # save_plan(str(call.message.chat.id), plan)
 
-    elif call.date == "sub_informatics":
+    elif call.data == "sub_informatics":
         topics = load_topics(os.path.join(topics_base_path, "informatics.txt"))
         bot.edit_message_text(f"Вы выбрали дисциплину 📚Информатика📚\nСписок тем: \n\n{topics}", chat_id = call.message.chat.id, message_id = call.message.message_id)
         bot.send_message(call.message.chat.id, "Введите дату экзамена в формате ДД.ММ.ГГГГ")
