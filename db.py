@@ -11,8 +11,10 @@ class BaseModel(Model):
 class User(BaseModel):
     id = AutoField()
     chat_id = IntegerField()
+    subject = TextField(null=True)
     exam_date = DateTimeField(null=True)
     day_left = IntegerField(null=True)
+    date_save_plan = DateTimeField(null=True)
     plan = TextField(null=True)
 
 # Контекстный менеджер для работы с БД
