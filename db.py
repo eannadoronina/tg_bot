@@ -1,8 +1,17 @@
 import os
-from peewee import SqliteDatabase, Model, IntegerField, DateTimeField, AutoField, TextField
+from peewee import SqliteDatabase, Model, IntegerField, DateTimeField, AutoField, TextField, FloatField, BooleanField
 
 db_path = os.path.join("persistence", 'users.db')
-db = SqliteDatabase(db_path)
+db = SqliteDatabase(
+    db_path,
+    pragmas={
+        'journal_mode': 'wal',      # обязательно для многопоточности
+        'cache_size': -64000,       # 64 МБ кэш
+        'synchronous': 1,           # NORMAL
+        'foreign_keys': 1,
+        'busy_timeout': 5000,       # 5 секунд ждём разблокировки
+    })
+
 
 class BaseModel(Model):
     class Meta:
@@ -13,7 +22,6 @@ class User(BaseModel):
     chat_id = IntegerField()
     subject_id = IntegerField(null=True)
     exam_date = DateTimeField(null=True)
-    day_left = IntegerField(null=True)
     date_save_plan = DateTimeField(null=True)
     plan = TextField(null=True)
 
@@ -22,41 +30,77 @@ class Subject(BaseModel):
     name = TextField(null=True)
     topics = TextField(null=True)
 
+class ScheduledTask(BaseModel):
+    id = AutoField()
+    chat_id = IntegerField()
+    topic_name = TextField()
+    run_time = DateTimeField()
+    c = FloatField()
+    k = FloatField()
+    flag = BooleanField()
+
 # Контекстный менеджер для работы с БД
 class DatabaseContext:
     def __enter__(self):
-        db.connect()
+        db.connect(reuse_if_open=True)
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if not db.is_closed():
-            db.close()
+        pass
 
     def get_or_create_user(self, chat_id):
         """Получить пользователя или создать нового"""
-        try:
-            user = User.get(User.chat_id == chat_id)
-            return user
-        except User.DoesNotExist:
-            user = User.create(chat_id=chat_id)
-            return user
+        with db.atomic():
+            try:
+                user = User.get(User.chat_id == chat_id)
+                return user
+            except User.DoesNotExist:
+                user = User.create(chat_id=chat_id)
+                return user
         
+    def delete_user(self, id):
+        with db.atomic():
+            User.delete_by_id(id)
+    
     def create_subject(self, name, topics):
-        subject = Subject.create(name, topics)
-        return subject
+        with db.atomic():
+            subject = Subject.create(name=name, topics=topics)
+            return subject
 
     def get_subject_by_id(self, id):
-        subject = Subject.get_or_none(Subject.id == id)
-        return subject
+        with db.atomic():
+            subject = Subject.get_or_none(Subject.id == id)
+            return subject
     
     def get_subject_by_name(self, name):
-        subject = Subject.get_or_none(Subject.name == name)
-        return subject
+        with db.atomic():
+            subject = Subject.get_or_none(Subject.name == name)
+            return subject
+    
+    def create_scheduled_task(self, chat_id, topic_name, run_time, c, k, flag):
+        with db.atomic():
+            return ScheduledTask.create(
+                chat_id=chat_id,
+                topic_name=topic_name,
+                run_time=run_time,
+                c=c,
+                k=k,
+                flag=flag
+            )
+        
+    def get_all_scheduled_task(self):
+        with db.atomic():
+            return ScheduledTask.select()
+        
+    def delete_scheduled_task(self, id):
+        with db.atomic():
+            ScheduledTask.delete_by_id(id)
 
 # Инициализация таблиц
 def init_db():
     with DatabaseContext():
-        db.create_tables([User, Subject], safe=True)
+        db.execute_sql('PRAGMA journal_mode=wal;')
+        db.create_tables([User, Subject, ScheduledTask], safe=True)
         if Subject.select().count() == 0:
             base_subjects = ["math", "physics", "informatics"]
             for sub in base_subjects:

@@ -3,12 +3,10 @@ from telebot import types
 from datetime import datetime
 from datetime import timedelta
 import os
-import sys
-from dotenv import load_dotenv
-from db import db, init_db, DatabaseContext
-import math
-import threading
 import time
+from dotenv import load_dotenv
+from db import init_db, DatabaseContext
+import threading
 
 # Загрузка токена для бота из переменной окружения
 load_dotenv()
@@ -19,12 +17,26 @@ init_db()
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
+# Функция исполнения запланированных оповещений
+def scheduler():
+    while True:
+        try:
+            with DatabaseContext() as ctx: 
+                task_all = ctx.get_all_scheduled_task()
+                for task in task_all:
+                    if datetime.now() >= task.run_time:
+                        send_repeat_notification(task.chat_id, task.topic_name, task.c, task.k, task.flag)
+                        ctx.delete_scheduled_task(task.id)             
+        except Exception:
+            pass
+        time.sleep(2)
+
 # Работа с файлами планов пользователей
 def save_plan(chat_id, plan):
     with DatabaseContext() as ctx:
         user = ctx.get_or_create_user(chat_id)
         user.plan = plan
-        user.date_save_plan = datetime.now().date()
+        user.date_save_plan = datetime.now()
         user.save()
 
 def load_plan(chat_id):
@@ -68,7 +80,6 @@ def get_exam_date(message):
         with DatabaseContext() as ctx:
             user = ctx.get_or_create_user(message.chat.id)            
             user.exam_date = examdate
-            user.day_left = day_left
             subject = ctx.get_subject_by_id(user.subject_id)
             if not subject:
                 bot.send_message(message.chat.id, "Предмет не найден 😢")
@@ -84,12 +95,7 @@ def get_exam_date(message):
         # Отправляем и сохраняем план
         bot.send_message(message.chat.id, f"До экзамена осталось {day_left} дней.\n\n📚 План подготовки:\n\n{plan}")
         save_plan(message.chat.id, plan)
-        # Сообщение с кнопками "Начнем подготовку?"
-        markup = types.InlineKeyboardMarkup()
-        but_yes = types.InlineKeyboardButton("Да ✅", callback_data="start_study")
-        but_no = types.InlineKeyboardButton("Нет ❌", callback_data="stop_study")
-        markup.add(but_yes, but_no)
-        bot.send_message(message.chat.id, "Начнем подготовку?", reply_markup=markup)
+        start_study(message.chat.id, None)# Сообщение с кнопками "Начнем подготовку?"
     except ValueError:
         bot.send_message(message.chat.id, "Неверный формат даты. Введите в формате ДД.ММ.ГГГГ ")
         bot.register_next_step_handler(message, get_exam_date)
@@ -133,7 +139,9 @@ def repeat_topics (chat_id, topic_name, c, k, c_deb, k_deb, flag):
     t_seconds = t * 60
     #t_seconds = 10
     # Планируем уведомление через t секунд
-    threading.Timer(t_seconds, send_repeat_notification, args=(chat_id, topic_name, c, k, flag)).start()
+    run_time = datetime.now() + timedelta(seconds=t_seconds)
+    with DatabaseContext() as ctx:
+        ctx.create_scheduled_task(chat_id, topic_name, run_time, c, k, flag)
 
 # Отправка уведомления
 def send_repeat_notification(chat_id, topic_name, c, k, flag):
@@ -142,7 +150,22 @@ def send_repeat_notification(chat_id, topic_name, c, k, flag):
     but_2 = types.InlineKeyboardButton("Нормально 🙂", callback_data=f"ok|{c}|{k}|{flag}")
     but_3 = types.InlineKeyboardButton("Сложно 🤯", callback_data=f"hard|{c}|{k}|{flag}")
     markup.add(but_1, but_2, but_3)
-    bot.send_message(chat_id, f"⏰ Пора повторить материалы из \n\n '{topic_name}' \n\n Как тебе далось изучение этих материалов?", reply_markup=markup)
+    bot.send_message(chat_id, f"⏰ Пора повторить материалы из \n\n {topic_name} \n\n Как тебе далось изучение этих материалов?", reply_markup=markup)
+
+def start_study(chat_id, message_id):
+    plan = load_plan(chat_id)
+    if plan:
+        if message_id:
+            bot.edit_message_text("Продолжаем подготовку 🤓", chat_id = chat_id, message_id = message_id)
+            bot.send_message(chat_id, f"📚 Твой план:\n\n{plan}")
+        # Сообщение с кнопками "Начнем подготовку?"
+        markup = types.InlineKeyboardMarkup()
+        but_yes = types.InlineKeyboardButton("Да ✅", callback_data="start_study")
+        but_no = types.InlineKeyboardButton("Нет ❌", callback_data="stop_study")
+        markup.add(but_yes, but_no)
+        bot.send_message(chat_id, "Начнем подготовку?", reply_markup=markup)
+    else:
+        bot.send_message(chat_id, "План пока не создан 😢")
 
 # Обработка команды start
 @bot.message_handler(commands=['start'])
@@ -170,18 +193,7 @@ def callback_handler(call):
         bot.edit_message_text("Отлично👍 Давай создадим новый план подготовки 📚\nВыбери дисциплину:", chat_id = call.message.chat.id, message_id = call.message.message_id, reply_markup=markup)
     
     elif call.data == "continue_plan":
-        plan = load_plan(call.message.chat.id)
-        if plan:
-            bot.edit_message_text("Продолжаем подготовку 🤓", chat_id = call.message.chat.id, message_id = call.message.message_id)
-            bot.send_message(call.message.chat.id, f"📚 Твой план:\n\n{plan}")
-            # Сообщение с кнопками "Начнем подготовку?"
-            markup = types.InlineKeyboardMarkup()
-            but_yes = types.InlineKeyboardButton("Да ✅", callback_data="start_study")
-            but_no = types.InlineKeyboardButton("Нет ❌", callback_data="stop_study")
-            markup.add(but_yes, but_no)
-            bot.send_message(call.message.chat.id, "Начнем подготовку?", reply_markup=markup)
-        else:
-            bot.send_message(call.message.chat.id, "План пока не создан 😢")
+        start_study(call.message.chat.id, call.message.message_id)
         
         
     elif call.data == "sub_math":
@@ -190,8 +202,7 @@ def callback_handler(call):
             subject = ctx.get_subject_by_name( "math")
             user.subject_id = subject.id
             user.save()
-        topics = subject.topics.split("\n")
-        bot.edit_message_text(f"Вы выбрали дисциплину 📚Математика📚\n\n", chat_id = call.message.chat.id, message_id = call.message.message_id)
+        bot.edit_message_text("Вы выбрали дисциплину 📚Математика📚\n\n", chat_id = call.message.chat.id, message_id = call.message.message_id)
         bot.send_message(call.message.chat.id, "Введите дату экзамена в формате ДД.ММ.ГГГГ")
         bot.register_next_step_handler_by_chat_id(call.message.chat.id, get_exam_date)
 
@@ -201,7 +212,6 @@ def callback_handler(call):
             subject = ctx.get_subject_by_name("physics")
             user.subject_id = subject.id
             user.save()
-        topics = subject.topics.split("\n")
         bot.edit_message_text("Вы выбрали дисциплину 📚Физика📚\n\n", chat_id = call.message.chat.id, message_id = call.message.message_id)
         bot.send_message(call.message.chat.id, "Введите дату экзамена в формате ДД.ММ.ГГГГ")
         bot.register_next_step_handler_by_chat_id(call.message.chat.id, get_exam_date)
@@ -212,7 +222,6 @@ def callback_handler(call):
             subject = ctx.get_subject_by_name("informatics")
             user.subject_id = subject.id
             user.save()
-        topics = subject.topics.split("\n")
         bot.edit_message_text("Вы выбрали дисциплину 📚Информатика📚\n\n", chat_id = call.message.chat.id, message_id = call.message.message_id)
         bot.send_message(call.message.chat.id, "Введите дату экзамена в формате ДД.ММ.ГГГГ")
         bot.register_next_step_handler_by_chat_id(call.message.chat.id, get_exam_date)
@@ -241,6 +250,7 @@ def callback_handler(call):
                 bot.send_message(call.message.chat.id, "\nКак выучил этот материал? Сложно ли далось изучение?", reply_markup=markup)
             else:
                 bot.send_message(call.message.chat.id, "Все темы уже изучены! 🎉\n\nНажми 👉 /start")
+                ctx.delete_user(user.id)
 
     elif call.data == "stop_study":
         bot.edit_message_text("Хорошо, возвращайся, когда будешь готов 😌\n\nНажми 👉 /start", chat_id=call.message.chat.id, message_id=call.message.message_id)
@@ -301,7 +311,7 @@ def callback_handler(call):
         data = call.data.split("|")
         c = float(data[1])
         k = float(data[2])
-        flag = bool(data[3])
+        flag = data[3] == "True"
         c_deb = 0.98
         k_deb = 1.25
         if flag == True:
@@ -319,7 +329,7 @@ def callback_handler(call):
         data = call.data.split("|")
         c = float(data[1])
         k = float(data[2])
-        flag = bool(data[3])
+        flag = data[3] == "True"
         c_deb = 1.02
         k_deb = 1.25
         if flag == True:
@@ -337,7 +347,7 @@ def callback_handler(call):
         data = call.data.split("|")
         c = float(data[1])
         k = float(data[2])
-        flag = bool(data[3])
+        flag = data[3] == "True"
         c_deb = 1.02
         k_deb = 1.15
         if flag == True:
@@ -348,8 +358,9 @@ def callback_handler(call):
 
 # Запуск
 if __name__ == "__main__":
+    thread = threading.Thread(target=scheduler)
+    thread.start()
     print("="*50)
     print("Бот успешно запущен и готов к работе!")
     print("="*50)
-    
     bot.polling(none_stop=True)
