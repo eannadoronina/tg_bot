@@ -23,6 +23,7 @@ class User(BaseModel):
     subject_id = IntegerField(null=True)
     exam_date = DateTimeField(null=True)
     date_save_plan = DateTimeField(null=True)
+    next_topic_notify_time = DateTimeField(null=True)
     plan = TextField(null=True)
 
 class Subject(BaseModel):
@@ -57,6 +58,10 @@ class DatabaseContext:
             except User.DoesNotExist:
                 user = User.create(chat_id=chat_id)
                 return user
+    
+    def get_all_users(self):
+        with db.atomic():
+            return User.select()
         
     def delete_user(self, id):
         with db.atomic():
