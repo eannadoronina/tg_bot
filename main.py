@@ -17,11 +17,8 @@ init_db()
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-def get_next():
-    #return  timedelta(days=1)
-    return  timedelta(seconds=15)
-    
-
+# ------------------------Работа с отправкой уведомлений------------------------
+  
 # Функция исполнения запланированных оповещений
 def scheduler():
     while True:
@@ -30,12 +27,10 @@ def scheduler():
                 users = ctx.get_all_users()
                 for user in users:
                     plan_lines = user.plan.split("\n\n")  # План по дням
-                   #today_index = (datetime.now().date() - user.date_save_plan.date()).days
-                    today_index = int ((datetime.now() - user.date_save_plan).total_seconds()//get_next().total_seconds())
+                    today_index = (datetime.now().date() - user.date_save_plan.date()).days
                     if user.next_topic_notify_time and datetime.now() >= user.next_topic_notify_time and today_index < len(plan_lines):
-                        print ("scheduler", user.next_topic_notify_time)
                         start_study(user.chat_id, None, True)
-                        user.next_topic_notify_time = datetime.now() + get_next()
+                        user.next_topic_notify_time = datetime.now() + timedelta(days=1)
                         user.save()
                 task_all = ctx.get_all_scheduled_task()
                 for task in task_all:
@@ -46,13 +41,27 @@ def scheduler():
             pass
         time.sleep(2)
 
-# Работа с файлами планов пользователей
+# Отправка уведомления
+def send_repeat_notification(chat_id, topic_name, c, k, flag):
+    with DatabaseContext() as ctx: 
+        task = ctx.get_scheduled_task_by_chat_id(chat_id)
+        today_index = task.index_day
+    markup = types.InlineKeyboardMarkup()
+    but_1 = types.InlineKeyboardButton("Легко ✅", callback_data=f"easy|{c}|{k}|{today_index}|{flag}")
+    but_2 = types.InlineKeyboardButton("Нормально 🙂", callback_data=f"ok|{c}|{k}|{today_index}|{flag}")
+    but_3 = types.InlineKeyboardButton("Сложно 🤯", callback_data=f"hard|{c}|{k}|{today_index}|{flag}")
+    markup.add(but_1, but_2, but_3)
+    bot.send_message(chat_id, f"⏰ Пора повторить материал: \n\n <blockquote>{topic_name}</blockquote>\n\n Как тебе далось изучение этих материалов?", reply_markup=markup, parse_mode="HTML")
+
+# ------------------------Работа с файлами------------------------
 def save_plan(chat_id, plan):
     with DatabaseContext() as ctx:
         user = ctx.get_or_create_user(chat_id)
         user.plan = plan
         user.date_save_plan = datetime.now()
-        user.next_topic_notify_time = user.date_save_plan + get_next()
+        user.number_current_topic = 0
+        user.last_activity_date = datetime.now()
+        user.next_topic_notify_time = user.date_save_plan + timedelta(days=1)
         user.save()
 
 def load_plan(chat_id):
@@ -60,6 +69,7 @@ def load_plan(chat_id):
         user = ctx.get_or_create_user(chat_id)
         return user.plan
 
+# ------------------------Работа с новой дисциплиной------------------------
 # Добавление новой дисциплины
 def save_new_subject_name(message):
     with DatabaseContext() as ctx:
@@ -83,6 +93,7 @@ def save_new_subject_topics(message, subject_id):
     bot.send_message(message.chat.id, "Введите дату экзамена в формате ДД.ММ.ГГГГ")
     bot.register_next_step_handler(message, get_exam_date)
 
+# ------------------------Работа с планами------------------------
 # Обработка даты 
 def get_exam_date(message):
     try:
@@ -107,10 +118,11 @@ def get_exam_date(message):
             bot.send_message(message.chat.id, "Не удалось загрузить темы 😢")
             return
         # Генерируем план
-        plan = generate_plan(topics, day_left)
+        plan = generate_plan(topics, day_left, message.chat.id)
+        formatted_plan = format_plan_for_display(plan)
         # Отправляем и сохраняем план
         bot.send_message(message.chat.id, f"До экзамена осталось {day_left} дней.")
-        bot.send_message(message.chat.id, f"<i>\n📚 <b>План подготовки:</b>\n\n{plan}<\i>", parse_mode="HTML")
+        bot.send_message(message.chat.id, f"<blockquote>\n📚 <b>План подготовки:</b>\n\n{formatted_plan}</blockquote>", parse_mode="HTML")
         save_plan(message.chat.id, plan)
         start_study(message.chat.id, None, False)# Сообщение с кнопками "Начнем подготовку?"
     except ValueError:
@@ -118,9 +130,10 @@ def get_exam_date(message):
         bot.register_next_step_handler(message, get_exam_date)
 
 # Генерация плана
-def generate_plan(topics, day_left):
+def generate_plan(topics, day_left, chat_id):
     if day_left <= 0:
-        return "Слишком мало времени для составления плана 😢"
+        bot.send_message(chat_id, "Слишком мало времени для составления плана 😢\n\nНажми 👉 /start")
+        return None
     plan = []
     topics_count = len(topics)
     topics_per_day = topics_count//day_left
@@ -136,14 +149,28 @@ def generate_plan(topics, day_left):
             if index< topics_count:
                 day_topics.append(topics[index])
                 index +=1 
-        if day_topics :
-            day_plan = f"\nДень {day}🗓:\n" +"\n".join(day_topics)
-            plan.append(day_plan)
+        if day_topics:
+            plan.append("\n".join(day_topics))
 
-    return "\n".join(plan)
+    return "\n\n".join(plan)
+
+# Пересчет плана
+def regenerate_plan(user):
+    plan_days = user.plan.split("\n")  # все темы
+    all_topics = []
+    for topic in plan_days:
+        all_topics.extend(topic.split("\n"))
+    remaining_topics = plan_days[user.number_current_topic:] # оставшиеся темы
+    if not remaining_topics:
+        return None
+    days_left = (user.exam_date.date() - datetime.now().date()).days # дни до экзамена
+    if days_left <= 0:
+        bot.send_message(user.chat_id, "Слишком мало времени для составления плана 😢\n\nНажми 👉 /start")
+    new_plan = generate_plan(remaining_topics, days_left, user.chat_id)
+    return new_plan
 
 # Повторение изученных тем
-def repeat_topics (chat_id, topic_name, c, k, c_deb, k_deb, flag):
+def repeat_topics (chat_id, topic_name, index_day, c, k, c_deb, k_deb, flag):
     b = 60
     k = k * k_deb
     c = c * c_deb
@@ -153,28 +180,30 @@ def repeat_topics (chat_id, topic_name, c, k, c_deb, k_deb, flag):
         flag = True
     else:
         flag = False
-    #t_seconds = t * 60
-    t_seconds = 8
+    t_seconds = t * 60
     # Планируем уведомление через t секунд
     run_time = datetime.now() + timedelta(seconds=t_seconds)
     with DatabaseContext() as ctx:
-        ctx.create_scheduled_task(chat_id, topic_name, run_time, c, k, flag)
+        ctx.create_scheduled_task(chat_id, topic_name, index_day, run_time, c, k, flag)
 
-# Отправка уведомления
-def send_repeat_notification(chat_id, topic_name, c, k, flag):
-    markup = types.InlineKeyboardMarkup()
-    but_1 = types.InlineKeyboardButton("Легко ✅", callback_data=f"easy|{c}|{k}|{flag}")
-    but_2 = types.InlineKeyboardButton("Нормально 🙂", callback_data=f"ok|{c}|{k}|{flag}")
-    but_3 = types.InlineKeyboardButton("Сложно 🤯", callback_data=f"hard|{c}|{k}|{flag}")
-    markup.add(but_1, but_2, but_3)
-    bot.send_message(chat_id, f"⏰ Пора повторить материалы из \n\n {topic_name} \n\n Как тебе далось изучение этих материалов?", reply_markup=markup)
+# Форматирование выводы плана
+def format_plan_for_display(plan):
+    days = plan.split("\n\n")
+    formatted_days = []
+    for i, day in enumerate(days, start=1):
+        topics = [t.strip() for t in day.split("\n") if t.strip()]        
+        if topics:
+            day_text = f"День {i} 🗓:\n" + "\n".join(topics)
+            formatted_days.append(day_text)
+    return "\n\n".join(formatted_days)
 
 def start_study(chat_id, message_id, repeat):
     plan = load_plan(chat_id)
     if plan:
         if message_id:
+            formatted_plan = format_plan_for_display(plan)
             bot.edit_message_text("Продолжаем подготовку 🤓", chat_id = chat_id, message_id = message_id)
-            bot.send_message(chat_id, f"<i><b>📚 Твой план:</b>\n\n{plan}</i>", parse_mode="HTML")
+            bot.send_message(chat_id, f"<blockquote><b>📚 Твой план:</b>\n\n{formatted_plan}</blockquote>", parse_mode="HTML")
         markup = types.InlineKeyboardMarkup()
         but_yes = types.InlineKeyboardButton("Да ✅", callback_data="start_study")
         but_no = types.InlineKeyboardButton("Нет ❌", callback_data="stop_study")
@@ -186,6 +215,9 @@ def start_study(chat_id, message_id, repeat):
     else:
         bot.send_message(chat_id, "План пока не создан 😢")
 
+
+
+# ------------------------Обработчики команд и кнопок------------------------
 # Обработка команды start
 @bot.message_handler(commands=['start'])
 def start_message(message):
@@ -252,25 +284,41 @@ def callback_handler(call):
     elif call.data == "start_study":
         with DatabaseContext() as ctx:
             user = ctx.get_or_create_user(call.message.chat.id)
-            plan_lines = user.plan.split("\n\n")  # План по дням
-            #today_index = (datetime.now().date() - user.date_save_plan.date()).days
-            today_index = int ((datetime.now() - user.date_save_plan).total_seconds()//get_next().total_seconds())
-            # Определяем сегодняшние темы
-            if today_index < len(plan_lines):
-                today_topics = plan_lines[today_index]
-                bot.edit_message_text(f"\n\n‼️Сегодня нужно изучить:\n\n{today_topics}", chat_id=call.message.chat.id, message_id=call.message.message_id)
-                # Спрашиваем про прогресс
-                markup = types.InlineKeyboardMarkup()
-                but_good = types.InlineKeyboardButton("Материал оказался легким, выучил его хорошо ✅", callback_data="learned_good")
-                but_ok = types.InlineKeyboardButton("В целом выучил нормально, но позже надо повторить 🙂", callback_data="learned_ok")
-                but_bad = types.InlineKeyboardButton("Очень сложная тема 🤯, плохо запоминается", callback_data="learned_bad")
-                markup.add(but_good)
-                markup.add(but_ok)
-                markup.add(but_bad)
-                bot.send_message(call.message.chat.id, "\nКак выучил этот материал? Сложно ли далось изучение?", reply_markup=markup)
+            today_index = int((datetime.now().date() - user.date_save_plan.date()).days)
+            days_missed = today_index - user.number_current_topic
+            if days_missed > 1:
+                new_plan = regenerate_plan(user)
+                if new_plan:
+                    user.plan = new_plan
+                    user.number_current_topic = 0  # начинаем с начала нового плана
+                    user.date_save_plan = datetime.now()
+                    user.save()
+                    formatted_plan = format_plan_for_display(new_plan)
+                    bot.edit_message_text( 
+                        f"Ты пропустил {days_missed} дней 😢\nЯ пересчитал план, чтобы ты всё успел 💪\n\n<blockquote>📚 Новый план:\n{formatted_plan}</blockquote>", 
+                        chat_id=call.message.chat.id, 
+                        message_id=call.message.message_id,
+                        parse_mode="HTML"
+                    )
+                start_study(call.message.chat.id, None, False) 
             else:
-                bot.send_message(call.message.chat.id, "Все темы уже изучены! 🎉\n\nНажми 👉 /start")
-                ctx.delete_user(user.id)
+                plan_lines = user.plan.split("\n\n")  # План по дням
+                # Определяем сегодняшние темы
+                if user.number_current_topic < len(plan_lines):
+                    today_topics = plan_lines[user.number_current_topic]
+                    bot.edit_message_text(f"\n\n‼️Сегодня нужно изучить:\n\n<blockquote>{today_topics}</blockquote>", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="HTML")
+                    # Спрашиваем про прогресс
+                    markup = types.InlineKeyboardMarkup()
+                    but_good = types.InlineKeyboardButton("Материал оказался легким✅", callback_data="learned_good")
+                    but_ok = types.InlineKeyboardButton("Выучил нормально, позже надо повторить🙂", callback_data="learned_ok")
+                    but_bad = types.InlineKeyboardButton("Очень сложная тема🤯, плохо запоминается", callback_data="learned_bad")
+                    markup.add(but_good)
+                    markup.add(but_ok)
+                    markup.add(but_bad)
+                    bot.send_message(call.message.chat.id, "\nКак выучил этот материал? Сложно ли далось изучение?", reply_markup=markup)
+                else:
+                    bot.send_message(call.message.chat.id, "Все темы уже изучены! 🎉\n\nНажми 👉 /start")
+                    ctx.delete_user(user.id)
 
     elif call.data == "stop_study":
         bot.edit_message_text("Хорошо, возвращайся, когда будешь готов 😌\n\nНажми 👉 /start", chat_id=call.message.chat.id, message_id=call.message.message_id)
@@ -278,105 +326,115 @@ def callback_handler(call):
     elif call.data == "learned_good":
         with DatabaseContext() as ctx:
             user = ctx.get_or_create_user(call.message.chat.id)
+            user.last_activity_date = datetime.now()
             plan_lines = user.plan.split("\n\n")  # План по дням
-            today_index = (datetime.now().date() - user.date_save_plan.date()).days
+            today_index = user.number_current_topic
             # Определяем сегодняшние темы
             if today_index < len(plan_lines):
                 today_topics = plan_lines[today_index]
+            user.number_current_topic+=1
+            user.save()
         c = 1.1
         k = 2.2
         c_deb = 1
         k_deb = 1
-        repeat_topics(call.message.chat.id, today_topics, c, k, c_deb, k_deb, True)
+        
+        repeat_topics(call.message.chat.id, today_topics, today_index, c, k, c_deb, k_deb, True)
         bot.edit_message_text("Ты молодец! Но помни, повторение - фундамент усвоения знаний 😌\nКогда нужно будет повторить материал, я тебе сообщу 😉\nДо скорых встреч!\n\nЕсли хочешь выйти в главное меню, нажми 👉 /start", chat_id=call.message.chat.id, message_id=call.message.message_id)
 
     elif call.data == "learned_ok":
         with DatabaseContext() as ctx:
             user = ctx.get_or_create_user(call.message.chat.id)
+            user.last_activity_date = datetime.now()
             plan_lines = user.plan.split("\n\n")  # План по дням
-            today_index = (datetime.now().date() - user.date_save_plan.date()).days
+            today_index = user.number_current_topic
             # Определяем сегодняшние темы
             if today_index < len(plan_lines):
                 today_topics = plan_lines[today_index]
+            user.number_current_topic+=1
+            user.save()
         c = 1.1
         k = 2.2
         c_deb = 1
         k_deb = 1
-        repeat_topics(call.message.chat.id, today_topics, c, k, c_deb, k_deb, True)
+        repeat_topics(call.message.chat.id, today_topics, today_index, c, k, c_deb, k_deb, True)
         bot.edit_message_text("Не переживай, скоро мы обязательно вернемся к повторению этого материала 😌. \nДо скорых встреч!\n\nЕсли хочешь выйти в главное меню, нажми 👉 /start", chat_id=call.message.chat.id, message_id=call.message.message_id)
 
     elif call.data == "learned_bad":
         with DatabaseContext() as ctx:
             user = ctx.get_or_create_user(call.message.chat.id)
+            user.last_activity_date = datetime.now()
             plan_lines = user.plan.split("\n\n")  # План по дням
-            today_index = (datetime.now().date() - user.date_save_plan.date()).days
+            today_index = user.number_current_topic
             # Определяем сегодняшние темы
             if today_index < len(plan_lines):
                 today_topics = plan_lines[today_index]
+            user.number_current_topic+=1
+            user.save()
         c = 1.1
         k = 2.2
         c_deb = 1
         k_deb = 1
-        repeat_topics(call.message.chat.id, today_topics, c, k, c_deb, k_deb, True)
+        repeat_topics(call.message.chat.id, today_topics, today_index, c, k, c_deb, k_deb, True)
         bot.edit_message_text("Не расстраивайся, частое повторение - залог успеха 😌, а я напомню тебе о повторении, когда это потребуется!\nДо скорых встреч!\n\nЕсли хочешь выйти в главное меню, нажми 👉 /start", chat_id=call.message.chat.id, message_id=call.message.message_id)   
     
     elif call.data.split("|")[0] == "easy":
-        with DatabaseContext() as ctx:
-            user = ctx.get_or_create_user(call.message.chat.id)
-            plan_lines = user.plan.split("\n\n")  # План по дням
-            today_index = (datetime.now().date() - user.date_save_plan.date()).days
-            # Определяем сегодняшние темы
-            if today_index < len(plan_lines):
-                today_topics = plan_lines[today_index]
         data = call.data.split("|")
         c = float(data[1])
         k = float(data[2])
-        flag = data[3] == "True"
+        today_index = int((data[3]))
+        flag = data[4] == "True"
+        with DatabaseContext() as ctx:
+            user = ctx.get_or_create_user(call.message.chat.id)
+            plan_lines = user.plan.split("\n\n")  # План по дням
+            # Определяем сегодняшние темы
+            if today_index < len(plan_lines):
+                today_topics = plan_lines[today_index]
         c_deb = 0.98
         k_deb = 1.25
         if flag == True:
-            repeat_topics(call.message.chat.id, today_topics, c, k, c_deb, k_deb, flag)
+            repeat_topics(call.message.chat.id, today_topics, today_index, c, k, c_deb, k_deb, True)
         bot.edit_message_text("Отлично! Пока отдохни, но скоро мы продолжим изучение 😌\n\nЕсли хочешь выйти в главное меню, нажми 👉 /start", chat_id=call.message.chat.id, message_id=call.message.message_id) 
     
     elif call.data.split("|")[0] == "ok":
-        with DatabaseContext() as ctx:
-            user = ctx.get_or_create_user(call.message.chat.id)
-            plan_lines = user.plan.split("\n\n")  # План по дням
-            today_index = (datetime.now().date() - user.date_save_plan.date()).days
-            # Определяем сегодняшние темы
-            if today_index < len(plan_lines):
-                today_topics = plan_lines[today_index]
         data = call.data.split("|")
         c = float(data[1])
         k = float(data[2])
-        flag = data[3] == "True"
+        today_index = int((data[3]))
+        flag = data[4] == "True"
+        with DatabaseContext() as ctx:
+            user = ctx.get_or_create_user(call.message.chat.id)
+            plan_lines = user.plan.split("\n\n")  # План по дням
+            # Определяем сегодняшние темы
+            if today_index < len(plan_lines):
+                today_topics = plan_lines[today_index]
         c_deb = 1.02
         k_deb = 1.25
         if flag == True:
-            repeat_topics(call.message.chat.id, today_topics, c, k, c_deb, k_deb, flag)
+            repeat_topics(call.message.chat.id, today_topics, today_index, c, k, c_deb, k_deb, True)
         bot.edit_message_text("Ты молодец! Скоро мы продолжим изучение 😌\n\nЕсли хочешь выйти в главное меню, нажми 👉 /start", chat_id=call.message.chat.id, message_id=call.message.message_id)
     
     elif call.data.split("|")[0] == "hard":
-        with DatabaseContext() as ctx:
-            user = ctx.get_or_create_user(call.message.chat.id)
-            plan_lines = user.plan.split("\n\n")  # План по дням
-            today_index = (datetime.now().date() - user.date_save_plan.date()).days
-            # Определяем сегодняшние темы
-            if today_index < len(plan_lines):
-                today_topics = plan_lines[today_index]
         data = call.data.split("|")
         c = float(data[1])
         k = float(data[2])
-        flag = data[3] == "True"
+        today_index = int((data[3]))
+        flag = data[4] == "True"
+        with DatabaseContext() as ctx:
+            user = ctx.get_or_create_user(call.message.chat.id)
+            plan_lines = user.plan.split("\n\n")  # План по дням
+            # Определяем сегодняшние темы
+            if today_index < len(plan_lines):
+                today_topics = plan_lines[today_index]
         c_deb = 1.02
         k_deb = 1.15
         if flag == True:
-            repeat_topics(call.message.chat.id, today_topics, c, k, c_deb, k_deb, flag)
+            repeat_topics(call.message.chat.id, today_topics, today_index, c, k, c_deb, k_deb, True)
         bot.edit_message_text("Хорошо! Будем учить усерднее 😌\n\nЕсли хочешь выйти в главное меню, нажми 👉 /start", chat_id=call.message.chat.id, message_id=call.message.message_id)
 
     bot.answer_callback_query(call.id)
 
-# Запуск
+# ------------------------Запуск------------------------
 if __name__ == "__main__":
     thread = threading.Thread(target=scheduler)
     thread.start()

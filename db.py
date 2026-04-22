@@ -25,6 +25,8 @@ class User(BaseModel):
     date_save_plan = DateTimeField(null=True)
     next_topic_notify_time = DateTimeField(null=True)
     plan = TextField(null=True)
+    number_current_topic = IntegerField(null=True)
+    last_activity_date = DateTimeField(null=True)
 
 class Subject(BaseModel):
     id = AutoField()
@@ -35,6 +37,7 @@ class ScheduledTask(BaseModel):
     id = AutoField()
     chat_id = IntegerField()
     topic_name = TextField()
+    index_day = IntegerField()
     run_time = DateTimeField()
     c = FloatField()
     k = FloatField()
@@ -82,11 +85,12 @@ class DatabaseContext:
             subject = Subject.get_or_none(Subject.name == name)
             return subject
     
-    def create_scheduled_task(self, chat_id, topic_name, run_time, c, k, flag):
+    def create_scheduled_task(self, chat_id, topic_name, index_day, run_time, c, k, flag):
         with db.atomic():
             return ScheduledTask.create(
                 chat_id=chat_id,
                 topic_name=topic_name,
+                index_day=index_day,
                 run_time=run_time,
                 c=c,
                 k=k,
@@ -96,6 +100,11 @@ class DatabaseContext:
     def get_all_scheduled_task(self):
         with db.atomic():
             return ScheduledTask.select()
+    
+    def get_scheduled_task_by_chat_id(self, chat_id):
+        with db.atomic():
+            task = ScheduledTask.get_or_none(ScheduledTask.chat_id == chat_id)
+            return task
         
     def delete_scheduled_task(self, id):
         with db.atomic():
